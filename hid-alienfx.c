@@ -1,0 +1,302 @@
+/*
+ * AlienFX led driver
+ *
+ * Copyright (c) 2015 Alexandr Ivanov <alexandr.sky@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of
+ * the License, or (at your option) any later version.
+ *
+ * FIXME
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ */
+
+#include <linux/device.h>
+#include <linux/hid.h>
+#include <linux/kernel.h>
+#include <linux/leds.h>
+#include <linux/module.h>
+
+
+#define ALIENFX_BUFFER_SIZE	9
+
+#define START_BYTE			0x02
+
+#define BLOCK_AC_POWER		0x05
+
+enum reset_type {
+	RESET_TOUCH_CONTROLS = 1,
+	RESET_SLEEP_LIGHTS_ON,
+	RESET_ALL_LIGHTS_OFF,
+	RESET_ALL_LIGHTS_ON
+};
+
+u8 CMD_RESET[]		= {0x02, 0x07, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+u8 CMD_TR_EXEC[]	= {0x02, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+u8 CMD_LOOP[]		= {0x02, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+u8 CMD_SET_COL[]	= {0x02, 0x03, BLOCK_AC_POWER, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+
+struct {
+	u8 start;
+	u8 cmd;
+	union {
+		struct {
+			u8 reg[3];
+			u8 rg;
+			u8 b;
+		} color;
+		u8 block;
+		u8 type;
+		u8 raw[7];
+	};
+};
+
+enum command {
+	COMMAND_END_STORAGE = 0x00,
+	COMMAND_SET_MORPH_COLOR,
+	COMMAND_SET_BLINK_COLOR,
+	COMMAND_SET_COLOR,
+	COMMAND_LOOP_BLOCK_END,
+	COMMAND_TRANSMIT_EXECUTE,
+	COMMAND_GET_STATUS,
+	COMMAND_RESET,
+	COMMAND_SAVE_NEXT,
+	COMMAND_SAVE,
+	COMMAND_SET_SPEED = 0x0E,
+	COMMAND_BATTERY_STATE = 0x0F
+};
+
+struct alienfx_dev;
+
+
+struct alienfx_led {
+	const char *name;
+	unsigned int id;
+	struct led_classdev classdev;
+	enum led_brightness brightness;
+	struct work_struct work;
+	struct alienfx_dev *dev;
+};
+
+
+struct alienfx_led m11x_leds[] = {
+	{.name = "keyboard", .id = 0x0001},
+	{.name = "speaker-left", .id = 0x0020},
+	{.name = "speaker-right", .id = 0x0040},
+	{.name = "logo", .id = 0x0100},
+	{.name = "media-bar", .id = 0x0800},
+	{.name = "power-button", .id = 0x2000},
+	{.name = "power-button-eyes", .id = 0x4000},
+	{.name = "power-reset-state", .id = 0x8000},
+	{.name = "all-but-power", .id = 0x0961},
+	{.name = "all", .id = 0xe961},
+	{ } //FIXME Или .name = NULL ?
+};
+
+struct alienfx_dev {
+	struct hid_device *hdev;
+	struct alienfx_led *leds;
+	struct mutex lock;
+};
+
+static const struct hid_device_id alienfx_id[] = {
+	{HID_USB_DEVICE(0x187c, 0x0522), .driver_data = (kernel_ulong_t) m11x_leds},
+	{}
+};
+
+static int alienfx_send_cmd(struct alienfx_dev *dev, u8 *data)
+{
+	int ret;
+
+	ret = hid_hw_raw_request(dev->hdev, data[0], data, ALIENFX_BUFFER_SIZE, HID_OUTPUT_REPORT, HID_REQ_SET_REPORT);
+	if (ret != ALIENFX_BUFFER_SIZE) {
+		hid_err(led->hdev, "failed to send set report request: %i\n", ret);
+		if (ret < 0)
+			return ret;
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static void alienfx_color_set(struct alienfx_dev *dev, int region, int r, int g, int b)
+{
+	CMD_SET_COL[3] = (region >> 16) & 0xff;
+	CMD_SET_COL[4] = (region >> 8) & 0xff;
+	CMD_SET_COL[5] = region & 0xff;
+
+	CMD_SET_COL[6] = ((r << 4) & 0xf0) | (g & 0x0f);
+	CMD_SET_COL[7] = (b << 4) & 0xf0;
+
+	alienfx_send_cmd(dev, CMD_SET_COL);
+
+}
+
+static void alienfx_brightness_set(struct led_classdev *led_cdev, enum led_brightness brightness)
+{
+	struct device *pdev = led_cdev->dev->parent;
+	struct hid_device *hdev = container_of(dev, struct hid_device, pdev);
+	struct alienfx_dev *dev = hid_get_drvdata(hdev);
+	struct alienfx_led *led; //FIXME м.б. сработает container_of?
+
+	for (led = dev->leds; led->name; led++) {
+		if (led_cdev == &led->classdev)
+			break;
+	}
+
+	if (led->name) {
+		led->brightness = brightness;
+		schedule_work(&dev->work);
+	}
+}
+
+static void alienfx_work(struct work_struct *work)
+{
+	struct alienfx_led *led = container_of(work, struct alienfx_led, work);
+
+	mutex_lock(&led->dev->lock);
+
+	alienfx_send_cmd(led->dev, CMD_RESET);
+
+	CMD_SET_COL[2] = block;
+	CMD_SET_COL[3] = reg1;
+	CMD_SET_COL[4] = reg2;
+
+
+	alienfx_send_cmd(led->dev, color_sdet);
+
+	alienfx_send_cmd(led->dev, CMD_LOOP);
+	alienfx_send_cmd(led->dev, CMD_TR_EXEC);
+// 	int i;
+// 	u8 leds = 0;
+// 	u8 mode;
+// 	struct gt683r_led *led = container_of(work, struct gt683r_led, work);
+//
+// 	mutex_lock(&led->lock);
+//
+// 	for (i = 0; i < GT683R_LED_COUNT; i++) {
+// 		if (led->brightnesses[i])
+// 			leds |= BIT(i);
+// 	}
+//
+// 	if (gt683r_leds_set(led, leds))
+// 		goto fail;
+//
+// 	if (leds)
+// 		mode = led->mode;
+// 	else
+// 		mode = GT683R_LED_OFF;
+//
+// 	gt683r_mode_set(led, mode);
+// 	fail:
+// 	mutex_unlock(&led->lock);
+}
+
+static int alienfx_probe(struct hid_device *hdev, const struct hid_device_id *id)
+{
+	int ret;
+	int name_sz;
+	char *name;
+	const char *devname;
+	struct alienfx_dev *dev;
+	struct alienfx_led *led;
+
+	dev = devm_kzalloc(&hdev->dev, sizeof(*dev), GFP_KERNEL);
+	if (!dev)
+		return -ENOMEM;
+
+	mutex_init(&dev->lock);
+
+	for (led = dev->leds; led->name; led++) {
+		printk(KERN_ALERT "!!!!!!! %s 0x%x\n", led->name, led->id);
+	}
+
+	dev->hdev = hdev;
+	hid_set_drvdata(hdev, dev);
+
+	ret = hid_parse(hdev);
+	if (ret) {
+		hid_err(hdev, "hid parsing failed\n");
+		return ret; //FIXME dev освобождается в alienfx_remove или это баг?
+	}
+
+	ret = hid_hw_start(hdev, HID_CONNECT_HIDRAW);
+	if (ret) {
+		hid_err(hdev, "hw start failed\n");
+		return ret; //FIXME dev освобождается в alienfx_remove или это баг?
+	}
+
+	dev->leds = (struct alienfx_led *)id->driver_data;
+
+	for (led = dev->leds; led->name; led++) {
+		devname = dev_name(&hdev->dev);
+		name_sz = strlen(devname) + strlen(led->name) + 3;
+
+		name = devm_kzalloc(&hdev->dev, name_sz, GFP_KERNEL);
+		if (!name) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+
+		snprintf(name, name_sz, "%s::%s", devname, led->name);
+		led->classdev.name = name;
+		led->classdev.max_brightness = 255;
+		led->classdev.brightness_set = alienfx_brightness_set;
+// 		led->classdev.groups = gt683r_led_groups;
+
+		ret = led_classdev_register(&hdev->dev, &led->classdev);
+		if (ret) {
+			hid_err(hdev, "could not register led device\n");
+			goto fail;
+		}
+		led->dev = dev;
+		INIT_WORK(&led->work, alienfx_work);
+	}
+
+	return 0;
+
+fail:
+// 	for (i = i - 1; i >= 0; i--) //FIXME сделать свою дерегистрацию
+// 		led_classdev_unregister(&dev->led_devs[i]);
+	hid_hw_stop(hdev);
+	return ret;
+}
+
+static void alienfx_remove(struct hid_device *hdev)
+{
+	struct alienfx_dev *dev = hid_get_drvdata(hdev);
+	struct alienfx_led *led;
+
+	for (led = dev->leds; led->name; led++) {
+		led_classdev_unregister(&led->classdev);
+	}
+
+	flush_work(&dev->work);
+	hid_hw_stop(hdev);
+}
+
+static int alienfx_raw_event(struct hid_device * hdev, struct hid_report *rep, u8 *raw_data, int size)
+{
+	printk(KERN_ALERT "EVENT\n");
+	return 1;
+}
+
+static struct hid_driver alienfx_driver = {
+	.probe = alienfx_probe,
+	.remove = alienfx_remove,
+	.name = "alienfx",
+	.id_table = alienfx_id,
+	.raw_event = alienfx_raw_event,
+};
+
+module_hid_driver(alienfx_driver);
+
+MODULE_AUTHOR("Janne Kanniainen");
+MODULE_DESCRIPTION("AlienFX driver");
+MODULE_LICENSE("GPL");
